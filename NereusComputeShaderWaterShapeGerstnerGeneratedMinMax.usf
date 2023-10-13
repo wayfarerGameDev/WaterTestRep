@@ -1,0 +1,87 @@
+#include "/Engine/Public/Platform.ush"
+
+// Math
+#define MATH_PI				3.14159265f
+
+// Uniforms (Out)
+RWTexture2D<float4> DisplacementRWTexture_Out;
+RWTexture2D<float4> NormalRWTexture_Out;
+
+// Uniforms (In)
+float2 PositionOffset_In;
+float Resolution_In;
+float Scale_In;
+float Time_In;
+
+// Uniforms (In)(Waves)
+float2 WaveWindDirection_In;
+float2 WaveDirection_In;
+float2 WaveWavelengthMinMax_In;
+float2 WaveSteepnessMinMax_In;
+float2 WaveAmplitudeMinMax_In;
+float WaveSpread_In;
+float WaveDistribution_In;
+int WaveCount_In;
+
+[numthreads(8, 8, 1)]
+void Compute(uint3 ThreadId : SV_DispatchThreadID)
+{
+	float2 XY = ThreadId.xy;
+	float2 UV = (float2(XY / float2(Resolution_In,Resolution_In)) * Scale_In) + PositionOffset_In;
+	float2 WavePositionOffset = UV;
+	
+	// Output
+	float3 Displacement = float3(0,0,0);
+	float3 Normal = float3(0,0,0);
+
+	// Hash Primes To Generate Random(*pseudo*) Waves
+	float MathHashXPrime = 10007.f;
+	float MathHashYPrime = 30270.f;
+
+	// Do Waves
+	for (int i = 0; i < WaveCount_In; i++)
+	{
+		// Get Wave Index Fraction
+		const float WaveIndexFraction = (float)i / (float)WaveCount_In;
+
+		// Generate Sequence Of Random(*pseudo*) Numbers From Hash (Called In Sequence)
+		MathHashXPrime = (MathHashXPrime) + 12345;
+		MathHashYPrime = (MathHashYPrime) + 12345 * 3.2f;
+	
+		// Get Wave Direction From Random | Lerp With Wind Direction (Normalized)
+		float2 WaveDirection = float2(cos(MathHashXPrime / 801571.f), sin(MathHashYPrime / 10223.f));
+		WaveDirection = normalize(lerp(WaveWindDirection_In, (WaveDirection_In * 2.f) - 1.f, WaveSpread_In));
+	
+		// Wave Alpha | Compute Wave Parameters
+		const float WaveAlpha = pow(WaveIndexFraction, WaveDistribution_In);
+		const float Wavelength = lerp(WaveWavelengthMinMax_In.y, WaveWavelengthMinMax_In.x, WaveAlpha);
+		const float Steepness = lerp(WaveSteepnessMinMax_In.y, WaveSteepnessMinMax_In.x, WaveAlpha);
+		const float Amplitude = lerp(WaveAmplitudeMinMax_In.y, WaveAmplitudeMinMax_In.x, WaveAlpha);
+
+		// Gerstner Wave
+		// https://developer.nvidia.com/gpugems/gpugems/part-i-natural-effects/chapter-1-effective-water-simulation-physical-models
+		float K = 2.f * MATH_PI / Wavelength;
+		float wKA = Amplitude * K;
+		float Q = Steepness / wKA;
+		float WaveSpeed = sqrt(K * 981.f);
+		float WavePosition = dot(WavePositionOffset, WaveDirection * K) - (WaveSpeed * Time_In);
+		float WaveSin = sin(WavePosition);
+		float WaveCos = cos(WavePosition);
+
+		// Displacement
+		Displacement.xy += -Q * WaveSin * WaveDirection * Amplitude;
+		Displacement.z += WaveCos * Amplitude;
+	
+		// Normal (hardcode limit (50) to ensure normal's Z component doesn't exceed a maximum value)
+		Normal.xy += WaveSin * wKA * WaveDirection;
+		Normal.z += WaveCos * Steepness * saturate((Amplitude * 50.f) / Wavelength);
+	}
+
+	// Displacement
+	DisplacementRWTexture_Out[XY] = float4(Displacement.x,Displacement.y,Displacement.z,1);
+
+	// Normals
+	// Normalize Our Normal (We also must flip it on z)
+	Normal = normalize(float3(Normal.x, Normal.y, 1.f - Normal.z));
+	NormalRWTexture_Out[ThreadId.xy] = float4(Normal.x,Normal.y,Normal.z,1);
+}
